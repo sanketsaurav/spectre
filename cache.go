@@ -138,6 +138,21 @@ func (c *Cache) CacheIterator(outputChannel chan CacheRow) {
 	}()
 }
 
+//CacheGetAllKeys returns a list of keys which are strings
+//It will give a list of all the keys from spectre
+
+func (c *Cache) CacheGetAllKeys() []string {
+	c.RLocker().Lock()
+	defer c.RLocker().Unlock()
+	var keySet []string
+	for i := 0; i < SHARD_COUNT; i++ {
+		for key, _ := range c.Data.MapList[i].Items {
+			keySet = append(keySet, key)
+		}
+	}
+	return keySet
+}
+
 // CacheGet returns the value in the cache pointed by the
 // input key parameter.
 // return values :
@@ -245,6 +260,7 @@ func (c *Cache) SetData(key string, value interface{}, size int) (bool, error) {
 	// locking currentSize atomic lock
 	c.Lock()
 	defer c.Unlock()
+	//fmt.Printf("\nvalue is going to be set is = %v\n", value)
 	if size > c.MaxSize {
 		return false, SizeLimitError
 	} else if !c.isSpaceAvaible(key, size) {

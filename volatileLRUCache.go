@@ -100,11 +100,12 @@ func (l *Link) add(temp *Link) {
 // to have the meta data of the keys ready. Also this structure is
 // thread safe; meaning several goroutine can operate concurrently.
 type VolatileLRUCache struct {
-	cache        *Cache
-	root         *Link
-	linkMap      map[string]*Link
-	globalTTL    time.Duration
-	sync.RWMutex // to make double linked list thread safe
+	cache         *Cache
+	root          *Link
+	isMakingSpace bool
+	linkMap       map[string]*Link
+	globalTTL     time.Duration
+	sync.RWMutex  // to make double linked list thread safe
 }
 
 // GetCurrentSize is a wrapper on top of Cache GetCurrentSize
@@ -194,6 +195,23 @@ func (vlruCache *VolatileLRUCache) VolatileLRUCacheIterator(outputChannel chan C
 	}()
 }
 
+// VolatileLRUCacheActiveKeysLength returns the legth of Active keys
+// return values :
+//		value: length of Cache
+func (vlruCache *VolatileLRUCache) VolatileLRUCacheActiveKeysLength() (lenCounter int) {
+	// Get all keys from Cache
+	keysSet := vlruCache.VolatileLRUCachedKeys()
+	vlruCache.Lock()
+	defer vlruCache.Unlock()
+	lenCounter = 0
+	for _, key := range keysSet {
+		if keyLink, linkOk := vlruCache.linkMap[key]; linkOk && !keyLink.isLinkTTLExpired() {
+			lenCounter += 1
+		}
+	}
+	return
+}
+
 // VolatileLRUCacheGet returns the value corresponding to a key present in Cache.
 // This also modify internal doubly link list to maintain the updated ttl and lru info
 // of the keys preset in Cache.
@@ -203,17 +221,31 @@ func (vlruCache *VolatileLRUCache) VolatileLRUCacheIterator(outputChannel chan C
 func (vlruCache *VolatileLRUCache) VolatileLRUCacheGet(key string) (interface{}, bool) {
 	// lower level is thread safe so making write lock after this.
 	value, ok := vlruCache.cache.CacheGet(key)
-	//fmt.Printf("cache value = %v error is = %v" , value, ok)
 	// changing the link so grabbing write lock
 	vlruCache.Lock()
 	defer vlruCache.Unlock()
-	keyLink := vlruCache.linkMap[key]
-	if !ok || keyLink.isLinkTTLExpired() {
+
+	keyLink, linkOk := vlruCache.linkMap[key]
+	if !ok {
 		return nil, false
+	} else if linkOk {
+		if keyLink.isLinkTTLExpired() {
+			return nil, false
+		} else {
+			keyLink.unlinkLRULink()
+			keyLink.addLRULink(vlruCache.root)
+		}
 	}
-	keyLink.unlinkLRULink()
-	keyLink.addLRULink(vlruCache.root)
 	return value, ok
+}
+
+func (vlruCache *VolatileLRUCache) VolatileLRUCacheSet(key string, value interface{}, size int, keyExpire time.Duration) (bool, error) {
+	// Check here to avoid race condition with makeSpace()
+	go vlruCache.goVolatileLRUCacheSet(key, value, size, keyExpire)
+	if vlruCache.isMakingSpace {
+		return false, LowSpaceError
+	}
+	return true, nil
 }
 
 // VolatileLRUCacheSet sets the value corresponding to a key in Cache.
@@ -230,14 +262,17 @@ func (vlruCache *VolatileLRUCache) VolatileLRUCacheGet(key string) (interface{},
 // return values :
 //		ok: true if operation is successful else false
 //		error: error in case of occurred error else nil
-func (vlruCache *VolatileLRUCache) VolatileLRUCacheSet(key string, value interface{}, size int, keyExpire time.Duration) (bool, error) {
+func (vlruCache *VolatileLRUCache) goVolatileLRUCacheSet(key string, value interface{}, size int, keyExpire time.Duration) (bool, error) {
 	//free memory from expired keys
 	vlruCache.Lock()
 	defer vlruCache.Unlock()
 	vlruCache.RemoveVolatileKey()
 	success, error := vlruCache.cache.SetData(key, value, size)
-	for error == LowSpaceError {
-		vlruCache.makeSpace()
+	//TODO : Re go through
+	if error == LowSpaceError {
+		if !vlruCache.isMakingSpace {
+			vlruCache.makeSpace()
+		}
 		success, error = vlruCache.cache.SetData(key, value, size)
 	}
 	if !success {
@@ -294,21 +329,35 @@ func (vlruCache *VolatileLRUCache) VolatileLRUCacheDelete(key string) {
 	}
 }
 
+func (vlruCache *VolatileLRUCache) VolatileLRUCachedKeys() (keySet []string) {
+	keySet = vlruCache.cache.CacheGetAllKeys()
+	return
+}
+
 // makeSpace frees the space with least recently key.
 // return values :
 //		ok: true if operation is successful else false
 //		error: error in case of occurred error else nil
 func (vlruCache *VolatileLRUCache) makeSpace() (bool, error) {
-	fmt.Printf("clearing space in volatile cache\n")
-	// linkTBE means link to be evicted with its data(key, value) in cache
-	linkTBE := vlruCache.root.lruNext
-	if linkTBE == vlruCache.root {
-		return false, errors.New("VolatileLRUCache is empty ... May be the memory is less")
+	defer func() {
+		vlruCache.isMakingSpace = false
+	}()
+	vlruCache.isMakingSpace = true
+	deleteCount := vlruCache.cache.MaxSize * 30 / 100
+	for deleteCount > 0 {
+
+		// linkTBE means link to be evicted with its data(key, value) in cache
+		linkTBE := vlruCache.root.lruNext
+		if linkTBE == vlruCache.root {
+			return false, errors.New("VolatileLRUCache is empty ... May be the memory is less")
+		}
+		key := linkTBE.key
+		vlruCache.cache.CacheDelete(key)
+		linkTBE.unlink()
+		delete(vlruCache.linkMap, key)
+		deleteCount = deleteCount - 1
 	}
-	key := linkTBE.key
-	vlruCache.cache.CacheDelete(key)
-	linkTBE.unlink()
-	delete(vlruCache.linkMap, key)
+	vlruCache.isMakingSpace = false
 	return true, nil
 }
 
@@ -339,11 +388,10 @@ func GetVolatileLRUCache(cacheSize int, cachePartitions int, ttl time.Duration) 
 	//converting ttl to seconds for microseconds
 	ttl = ttl * time.Second
 	newVolatileCache.globalTTL = ttl
-	//fmt.Printf("global ttl  .... %v \n", newVolatileCache.globalTTL)
-	//fmt.Printf("current time.... %v \n", time.Now())
 	newVolatileCache.root.lruNext = newVolatileCache.root
 	newVolatileCache.root.lruPrev = newVolatileCache.root
 	newVolatileCache.root.ttlNext = newVolatileCache.root
 	newVolatileCache.root.ttlPrev = newVolatileCache.root
+	newVolatileCache.isMakingSpace = false
 	return newVolatileCache
 }
