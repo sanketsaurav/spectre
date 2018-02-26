@@ -48,8 +48,8 @@ type threadSafeMap struct {
 }
 
 func (tsm *threadSafeMap) String() string {
-	tsm.RLocker().Lock()
-	defer tsm.RLocker().Unlock()
+	tsm.RLock()
+	defer tsm.RUnlock()
 	return fmt.Sprintf("{currentsize:%v, data:%v}", len(tsm.Items), tsm.Items)
 }
 
@@ -87,8 +87,8 @@ type Cache struct {
 
 // GetCurrentSize return the current size of the cache.
 func (c *Cache) GetCurrentSize() int {
-	c.RLocker().Lock()
-	defer c.RLocker().Unlock()
+	c.RLock()
+	defer c.RUnlock()
 	var totalSize int
 	for _, size := range c.Size {
 		totalSize = totalSize + size
@@ -98,8 +98,8 @@ func (c *Cache) GetCurrentSize() int {
 }
 
 func (c *Cache) String() string {
-	c.RLocker().Lock()
-	defer c.RLocker().Unlock()
+	c.RLock()
+	defer c.RUnlock()
 	return fmt.Sprintf("{currentsize:%v, data:%v}", c.CurrentSize, c.Data)
 }
 
@@ -126,8 +126,8 @@ func (c *Cache) CacheIterator(outputChannel chan CacheRow) {
 			}
 		}()
 
-		c.RLocker().Lock()
-		defer c.RLocker().Unlock()
+		c.RLock()
+		defer c.RUnlock()
 		for i := 0; i < SHARD_COUNT; i++ {
 			for key, value := range c.Data.MapList[i].Items {
 				temp := CacheRow{key, value}
@@ -142,13 +142,16 @@ func (c *Cache) CacheIterator(outputChannel chan CacheRow) {
 //It will give a list of all the keys from spectre
 
 func (c *Cache) CacheGetAllKeys() []string {
-	c.RLocker().Lock()
-	defer c.RLocker().Unlock()
+	c.RLock()
+	defer c.RUnlock()
 	var keySet []string
 	for i := 0; i < SHARD_COUNT; i++ {
+		// To avoid concurrent read and writes to the map
+		c.Data.MapList[i].RLock()
 		for key, _ := range c.Data.MapList[i].Items {
 			keySet = append(keySet, key)
 		}
+		c.Data.MapList[i].RUnlock()
 	}
 	return keySet
 }
@@ -159,11 +162,11 @@ func (c *Cache) CacheGetAllKeys() []string {
 //		ok: true if success else false
 //		val: value corresponding to the key
 func (c *Cache) CacheGet(key string) (interface{}, bool) {
-	c.RLocker().Lock()
-	defer c.RLocker().Unlock()
+	c.RLock()
+	defer c.RUnlock()
 	sharedMap := c.Data.getShardMap(key)
-	sharedMap.RLocker().Lock()
-	defer sharedMap.RLocker().Unlock()
+	sharedMap.RLock()
+	defer sharedMap.RUnlock()
 	val, ok := sharedMap.Items[key]
 	return val, ok
 }
@@ -190,11 +193,11 @@ func (c *Cache) CacheSet(key string, value interface{}, size int) (bool, error) 
 //		error: error in the operation
 func (c *Cache) makeSpace(key string, size int) (bool, error) {
 	sharedMap := c.Data.getShardMap(key)
-	sharedMap.RLocker().Lock()
+	sharedMap.RLock()
 	_, ok := sharedMap.Items[key]
 	// remove the lock from current shared map
 	// to avoid deadloack condition
-	sharedMap.RLocker().Unlock()
+	sharedMap.RUnlock()
 	if !ok || c.Size[key] < size {
 		for c.CurrentSize+size > c.MaxSize {
 			c.deleteRandomKey()
@@ -228,8 +231,8 @@ func (c *Cache) deleteRandomKey() {
 //		retFlag: true if space is available else false
 func (c *Cache) isSpaceAvaible(key string, size int) bool {
 	sharedMap := c.Data.getShardMap(key)
-	sharedMap.RLocker().Lock()
-	defer sharedMap.RLocker().Unlock()
+	sharedMap.RLock()
+	defer sharedMap.RUnlock()
 	_, ok := sharedMap.Items[key]
 	var retFlag bool
 	if ok {
@@ -279,12 +282,12 @@ func (c *Cache) SetData(key string, value interface{}, size int) (bool, error) {
 func (c *Cache) CacheDelete(key string) {
 	c.Lock()
 	defer c.Unlock()
+	c.CurrentSize = c.CurrentSize - int(c.Size[key])
+	delete(c.Size, key)
 	sharedMap := c.Data.getShardMap(key)
 	sharedMap.Lock()
 	defer sharedMap.Unlock()
 	delete(sharedMap.Items, key)
-	c.CurrentSize = c.CurrentSize - int(c.Size[key])
-	delete(c.Size, key)
 }
 
 // ClearCache clears all the keys in the cache.

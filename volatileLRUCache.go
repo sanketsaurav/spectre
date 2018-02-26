@@ -2,8 +2,9 @@ package spectre
 
 import (
 	"bytes"
-	"errors"
+	//"errors"
 	"fmt"
+	"runtime/debug"
 	"sync"
 	"time"
 )
@@ -103,6 +104,7 @@ type VolatileLRUCache struct {
 	cache         *Cache
 	root          *Link
 	isMakingSpace bool
+	setMiss       int
 	linkMap       map[string]*Link
 	globalTTL     time.Duration
 	sync.RWMutex  // to make double linked list thread safe
@@ -111,14 +113,14 @@ type VolatileLRUCache struct {
 // GetCurrentSize is a wrapper on top of Cache GetCurrentSize
 // which returns the current VolatileLRUCache size in bytes.
 func (vlruCache *VolatileLRUCache) VolatileLRUCacheCurrentSize() int {
-	vlruCache.RLocker().Lock()
-	defer vlruCache.RLocker().Unlock()
+	vlruCache.RLock()
+	defer vlruCache.RUnlock()
 	return vlruCache.cache.GetCurrentSize()
 }
 
 func (vlruCache *VolatileLRUCache) String() string {
-	vlruCache.RLocker().Lock()
-	defer vlruCache.RLocker().Unlock()
+	vlruCache.RLock()
+	defer vlruCache.RUnlock()
 	var buffer bytes.Buffer
 	buffer.WriteString(fmt.Sprintf("currentsize:%v\n", vlruCache.cache.CurrentSize))
 	buffer.WriteString(vlruCache.GetLRUInfo())
@@ -128,8 +130,8 @@ func (vlruCache *VolatileLRUCache) String() string {
 
 // GetLRUInfo return the lru information of the keys in VolatileLRUCache.
 func (vlruCache *VolatileLRUCache) GetLRUInfo() string {
-	vlruCache.RLocker().Lock()
-	defer vlruCache.RLocker().Unlock()
+	vlruCache.RLock()
+	defer vlruCache.RUnlock()
 	rootLink := vlruCache.root
 	startingLink := rootLink.lruNext
 	var keyList []string
@@ -148,8 +150,8 @@ func (vlruCache *VolatileLRUCache) GetLRUInfo() string {
 
 // GetLRUInfo return the ttl information of the keys in VolatileLRUCache.
 func (vlruCache *VolatileLRUCache) GetTTLInfo() string {
-	vlruCache.RLocker().Lock()
-	defer vlruCache.RLocker().Unlock()
+	vlruCache.RLock()
+	defer vlruCache.RUnlock()
 	rootLink := vlruCache.root
 	startingLink := rootLink.ttlNext
 	var keyList []string
@@ -175,8 +177,8 @@ func (vlruCache *VolatileLRUCache) VolatileLRUCacheIterator(outputChannel chan C
 			}
 		}()
 
-		vlruCache.RLocker().Lock()
-		defer vlruCache.RLocker().Unlock()
+		vlruCache.RLock()
+		defer vlruCache.RUnlock()
 		rootLink := vlruCache.root
 		// taking ttl pointer to start with the oldest key
 		startingLink := rootLink.ttlNext
@@ -219,12 +221,11 @@ func (vlruCache *VolatileLRUCache) VolatileLRUCacheActiveKeysLength() (lenCounte
 //		value: value corresponding to the key
 //		ok: true if success else false
 func (vlruCache *VolatileLRUCache) VolatileLRUCacheGet(key string) (interface{}, bool) {
-	// lower level is thread safe so making write lock after this.
 	value, ok := vlruCache.cache.CacheGet(key)
+
 	// changing the link so grabbing write lock
 	vlruCache.Lock()
 	defer vlruCache.Unlock()
-
 	keyLink, linkOk := vlruCache.linkMap[key]
 	if !ok {
 		return nil, false
@@ -239,10 +240,27 @@ func (vlruCache *VolatileLRUCache) VolatileLRUCacheGet(key string) (interface{},
 	return value, ok
 }
 
+// To be used for larger calls, while being set. This delays set but makes set accurate.
+func (vlruCache *VolatileLRUCache) VolatileLRUCacheSyncSet(key string, value interface{}, size int, keyExpire time.Duration) (bool, error) {
+	// Check here to avoid race condition with makeSpace()
+	vlruCache.goVolatileLRUCacheSet(key, value, size, keyExpire)
+	if vlruCache.isMakingSpace {
+		vlruCache.setMiss += 1
+		fmt.Println("SPECTRE_SET_FAILED, IS_MAKING_SPACE, KEY: " + key +
+			fmt.Sprintf(" || currentsize: %v || Set Miss Count: %v", vlruCache.cache.CurrentSize, vlruCache.setMiss))
+		return false, LowSpaceError
+	}
+	return true, nil
+}
+
+// Here, while set being done, another hit can got for get, as set is async.
 func (vlruCache *VolatileLRUCache) VolatileLRUCacheSet(key string, value interface{}, size int, keyExpire time.Duration) (bool, error) {
 	// Check here to avoid race condition with makeSpace()
 	go vlruCache.goVolatileLRUCacheSet(key, value, size, keyExpire)
 	if vlruCache.isMakingSpace {
+		vlruCache.setMiss += 1
+		fmt.Println("SPECTRE_SET_FAILED, IS_MAKING_SPACE, KEY: " + key +
+			fmt.Sprintf(" || currentsize: %v || Set Miss Count: %v", vlruCache.cache.CurrentSize, vlruCache.setMiss))
 		return false, LowSpaceError
 	}
 	return true, nil
@@ -265,7 +283,14 @@ func (vlruCache *VolatileLRUCache) VolatileLRUCacheSet(key string, value interfa
 func (vlruCache *VolatileLRUCache) goVolatileLRUCacheSet(key string, value interface{}, size int, keyExpire time.Duration) (bool, error) {
 	//free memory from expired keys
 	vlruCache.Lock()
-	defer vlruCache.Unlock()
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Println("PANIC, goVolatileLRUCacheSet ", fmt.Sprintf("Error: %v Trace: %v", r, string(debug.Stack())))
+		}
+		vlruCache.isMakingSpace = false
+		vlruCache.setMiss = 0
+		vlruCache.Unlock()
+	}()
 	vlruCache.RemoveVolatileKey()
 	success, error := vlruCache.cache.SetData(key, value, size)
 	//TODO : Re go through
@@ -313,12 +338,12 @@ func (vlruCache *VolatileLRUCache) RemoveVolatileKey() {
 
 // VolatileLRUCacheDelete deletes a key present in VolatileLRUCache.
 func (vlruCache *VolatileLRUCache) VolatileLRUCacheDelete(key string) {
-	// lower level is thread safe so making write lock after this.
+	// changing the link so grabbing write lock
+	// Making Delete also single threaded
+	vlruCache.Lock()
+	defer vlruCache.Unlock()
 	_, ok := vlruCache.cache.CacheGet(key)
 	if ok {
-		// changing the link so grabbing write lock
-		vlruCache.Lock()
-		defer vlruCache.Unlock()
 		vlruCache.RemoveVolatileKey()
 		vlruCache.cache.CacheDelete(key)
 		deletedLink := vlruCache.linkMap[key]
@@ -340,24 +365,27 @@ func (vlruCache *VolatileLRUCache) VolatileLRUCachedKeys() (keySet []string) {
 //		error: error in case of occurred error else nil
 func (vlruCache *VolatileLRUCache) makeSpace() (bool, error) {
 	defer func() {
+		if r := recover(); r != nil {
+			fmt.Println("PANIC, MAKE_SPACE ", fmt.Sprintf("Error: %v Trace: %v", r, string(debug.Stack())))
+		}
 		vlruCache.isMakingSpace = false
+		vlruCache.setMiss = 0
 	}()
 	vlruCache.isMakingSpace = true
-	deleteCount := vlruCache.cache.MaxSize * 30 / 100
-	for deleteCount > 0 {
+	deleteCount := vlruCache.cache.MaxSize * 50 / 100
+	for cnt := 0; cnt < deleteCount; cnt++ {
 
 		// linkTBE means link to be evicted with its data(key, value) in cache
 		linkTBE := vlruCache.root.lruNext
-		if linkTBE == vlruCache.root {
-			return false, errors.New("VolatileLRUCache is empty ... May be the memory is less")
-		}
+		//if linkTBE == vlruCache.root {
+		//	fmt.Println("MAKE_SPACE VolatileLRUCache is empty ... May be the memory is less")
+		//	return false, errors.New("VolatileLRUCache is empty ... May be the memory is less")
+		//}
 		key := linkTBE.key
 		vlruCache.cache.CacheDelete(key)
 		linkTBE.unlink()
 		delete(vlruCache.linkMap, key)
-		deleteCount = deleteCount - 1
 	}
-	vlruCache.isMakingSpace = false
 	return true, nil
 }
 
@@ -393,5 +421,6 @@ func GetVolatileLRUCache(cacheSize int, cachePartitions int, ttl time.Duration) 
 	newVolatileCache.root.ttlNext = newVolatileCache.root
 	newVolatileCache.root.ttlPrev = newVolatileCache.root
 	newVolatileCache.isMakingSpace = false
+	newVolatileCache.setMiss = 0
 	return newVolatileCache
 }
