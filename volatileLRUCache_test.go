@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-var VolatileLRUCacheTest = GetVolatileLRUCache(50000.0, 15, time.Duration(3600))
+var VolatileLRUCacheTest = GetVolatileLRUCache(50000.0, time.Duration(3600))
 
 func TestVolatileLRUCacheCurrentSize(t *testing.T) {
 	var size = 0

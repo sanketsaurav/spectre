@@ -20,13 +20,9 @@ go get github.com/vivek07672/spectre
 import "github.com/vivek07672/spectre"
 
 // so the first step is to get the cache variable
-volatileLRUCache := volatileLRUCache.GetVolatileLRUCache(cacheSize int, cachePartitions int, ttl time.Duration)
+volatileLRUCache := volatileLRUCache.GetVolatileLRUCache(cacheSize int, ttl time.Duration)
 the parameters :
 	cacheSize: size of ram memory in bytes that is to be allocated to the cache
-	cachePartitions: no of internal maps to be used
-				- larger the number better thread safe (32 is a good count )
-			 inside total this many maps are kept to cache the date , each map can give access to 
-			 one goroutine at any time .
 	ttl: a global timeout for all the keys
 	
 // now its time for some operation testing

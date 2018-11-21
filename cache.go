@@ -10,7 +10,7 @@ import (
 
 // SHARD_COUNT is the number of golang maps that are going to participate in caching
 // internally.
-var SHARD_COUNT int
+var SHARD_COUNT int = 256
 
 // lowSpaceError is the error that is thrown when the cache object is capable of
 // caching the given value ,but the cache object is running out of memory.
@@ -304,8 +304,7 @@ func (c *Cache) ClearCache() {
 // GetDefaultCache returns the most abstract cache just using the
 // cap in memory limit . Cache is having algorithm to evict key when
 // space is not available in random selection.
-func GetDefaultCache(cacheSize int, cachePartitions int) *Cache {
-	SHARD_COUNT = cachePartitions
+func GetDefaultCache(cacheSize int) *Cache {
 	newCache := &Cache{
 		Data: &cacheData{MapList: make([]*threadSafeMap, SHARD_COUNT)},
 		Size: make(map[string]int),
