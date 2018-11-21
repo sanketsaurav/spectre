@@ -214,6 +214,8 @@ func (vlruCache *VolatileLRUCache) VolatileLRUCacheActiveKeysLength() (lenCounte
 	return
 }
 
+
+
 // VolatileLRUCacheGet returns the value corresponding to a key present in Cache.
 // This also modify internal doubly link list to maintain the updated ttl and lru info
 // of the keys preset in Cache.
@@ -223,18 +225,23 @@ func (vlruCache *VolatileLRUCache) VolatileLRUCacheActiveKeysLength() (lenCounte
 func (vlruCache *VolatileLRUCache) VolatileLRUCacheGet(key string) (interface{}, bool) {
 	value, ok := vlruCache.cache.CacheGet(key)
 
-	// changing the link so grabbing write lock
-	vlruCache.Lock()
-	defer vlruCache.Unlock()
-	keyLink, linkOk := vlruCache.linkMap[key]
 	if !ok {
 		return nil, false
-	} else if linkOk {
-		if keyLink.isLinkTTLExpired() {
-			return nil, false
-		} else {
-			keyLink.unlinkLRULink()
-			keyLink.addLRULink(vlruCache.root)
+	} else {
+		// changing the link so grabbing write lock
+		// Grab lock only if value present in the cache.
+		// It does not grab lock, only if cache is not present.
+		// This will help when key is not exists then lock is not acquired.
+		vlruCache.Lock()
+		defer vlruCache.Unlock()
+		keyLink, linkOk := vlruCache.linkMap[key]
+		if linkOk {
+			if keyLink.isLinkTTLExpired() {
+				return nil, false
+			} else {
+				keyLink.unlinkLRULink()
+				keyLink.addLRULink(vlruCache.root)
+			}
 		}
 	}
 	return value, ok
@@ -242,14 +249,7 @@ func (vlruCache *VolatileLRUCache) VolatileLRUCacheGet(key string) (interface{},
 
 // To be used for larger calls, while being set. This delays set but makes set accurate.
 func (vlruCache *VolatileLRUCache) VolatileLRUCacheSyncSet(key string, value interface{}, size int, keyExpire time.Duration) (bool, error) {
-	// Check here to avoid race condition with makeSpace()
 	vlruCache.goVolatileLRUCacheSet(key, value, size, keyExpire)
-	if vlruCache.isMakingSpace {
-		vlruCache.setMiss += 1
-		fmt.Println("SPECTRE_SET_FAILED, IS_MAKING_SPACE, KEY: " + key +
-			fmt.Sprintf(" || currentsize: %v || Set Miss Count: %v", vlruCache.cache.CurrentSize, vlruCache.setMiss))
-		return false, LowSpaceError
-	}
 	return true, nil
 }
 
@@ -258,10 +258,24 @@ func (vlruCache *VolatileLRUCache) VolatileLRUCacheSet(key string, value interfa
 	// Check here to avoid race condition with makeSpace()
 	go vlruCache.goVolatileLRUCacheSet(key, value, size, keyExpire)
 	if vlruCache.isMakingSpace {
+		fmt.Println("SPECTRE_SET_FAILED, IS_MAKING_SPACE, KEY: " + key +
+			fmt.Sprintf(" || currentsize: %v ", vlruCache.cache.CurrentSize))
+		return false, LowSpaceError
+	}
+	return true, nil
+}
+
+// Here, If Spectre is doing isMaking Space, till that time it does not queue messages to set in spectre. Set miss happens.
+// This to be used when fallback is another cache.
+func (vlruCache *VolatileLRUCache) VolatileLRUCacheNoQueueSet(key string, value interface{}, size int, keyExpire time.Duration) (bool, error) {
+	// Check here to avoid race condition with makeSpace()
+	if vlruCache.isMakingSpace {
 		vlruCache.setMiss += 1
 		fmt.Println("SPECTRE_SET_FAILED, IS_MAKING_SPACE, KEY: " + key +
 			fmt.Sprintf(" || currentsize: %v || Set Miss Count: %v", vlruCache.cache.CurrentSize, vlruCache.setMiss))
 		return false, LowSpaceError
+	} else {
+		go vlruCache.goVolatileLRUCacheSet(key, value, size, keyExpire)
 	}
 	return true, nil
 }
@@ -372,7 +386,7 @@ func (vlruCache *VolatileLRUCache) makeSpace() (bool, error) {
 		vlruCache.setMiss = 0
 	}()
 	vlruCache.isMakingSpace = true
-	deleteCount := vlruCache.cache.MaxSize * 50 / 100
+	deleteCount := vlruCache.cache.MaxSize * 30 / 100
 	for cnt := 0; cnt < deleteCount; cnt++ {
 
 		// linkTBE means link to be evicted with its data(key, value) in cache
@@ -407,9 +421,9 @@ func (vlruCache *VolatileLRUCache) VolatileLRUCacheClear() {
 //			cacheSize: size of the cache in bytes
 //			cachePartitions: total number map participating in internal cache.
 //			ttl: a global time duration for each key expiration.
-func GetVolatileLRUCache(cacheSize int, cachePartitions int, ttl time.Duration) *VolatileLRUCache {
+func GetVolatileLRUCache(cacheSize int, ttl time.Duration) *VolatileLRUCache {
 	newVolatileCache := &VolatileLRUCache{
-		cache:   GetDefaultCache(cacheSize, cachePartitions),
+		cache:   GetDefaultCache(cacheSize),
 		root:    &Link{},
 		linkMap: make(map[string]*Link),
 	}

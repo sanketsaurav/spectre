@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-var testCache = GetDefaultCache(5000, 15)
+var testCache = GetDefaultCache(5000)
 
 func TestGetCurrentSize(t *testing.T) {
 	var size = 0
