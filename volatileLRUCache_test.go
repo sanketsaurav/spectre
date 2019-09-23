@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-var VolatileLRUCacheTest = GetVolatileLRUCache(50000.0, time.Duration(3600))
+var VolatileLRUCacheTest = GetVolatileLRUCacheV2("test", 50000.0, time.Duration(3600))
 
 func TestVolatileLRUCacheCurrentSize(t *testing.T) {
 	var size = 0
@@ -96,11 +96,9 @@ func BenchmarkVolatileLRUCacheGet(b *testing.B) {
 	}
 }
 
+// Deprecated
 func TestVolatileLRUCacheSet(t *testing.T) {
-	success, error := VolatileLRUCacheTest.VolatileLRUCacheSet("vivek", "vivek", binary.Size([]byte("vivek")), time.Duration(0))
-	if !success {
-		t.Fatalf("data setting got failed in Cache with algo %v", error)
-	}
+	VolatileLRUCacheTest.VolatileLRUCacheSet("vivek", "vivek", binary.Size([]byte("vivek")), time.Duration(0))
 }
 
 func BenchmarkVolatileLRUCacheSet(b *testing.B) {
@@ -111,14 +109,11 @@ func BenchmarkVolatileLRUCacheSet(b *testing.B) {
 }
 
 func TestVolatileLRUCacheDelete(t *testing.T) {
-	success, error := VolatileLRUCacheTest.VolatileLRUCacheSet("vivek", "vivek", binary.Size([]byte("vivek")), time.Duration(0))
-	if !success {
-		t.Fatalf("could not set data to test delete")
-	}
+	VolatileLRUCacheTest.VolatileLRUCacheSet("vivek", "vivek", binary.Size([]byte("vivek")), time.Duration(0))
 	VolatileLRUCacheTest.VolatileLRUCacheDelete("vivek")
-	_, success = VolatileLRUCacheTest.VolatileLRUCacheGet("vivek")
+	_, success := VolatileLRUCacheTest.VolatileLRUCacheGet("vivek")
 	if success {
-		t.Fatalf("could not delete the element in Cache. Cache delete got failed", error)
+		t.Fatalf("could not delete the element in Cache. Cache delete got failed")
 	}
 }
 
@@ -126,12 +121,9 @@ func BenchmarkVolatileLRUCacheDelete(b *testing.B) {
 	// run the Cache set  function b.N times
 	for n := 0; n < b.N; n++ {
 		VolatileLRUCacheTest.VolatileLRUCacheClear()
-		success, _ := VolatileLRUCacheTest.VolatileLRUCacheSet("vivek", "vivek", binary.Size([]byte("vivek")), time.Duration(0))
-		if !success {
-			b.Fatalf("could not set data to test delete")
-		}
+		VolatileLRUCacheTest.VolatileLRUCacheSet("vivek", "vivek", binary.Size([]byte("vivek")), time.Duration(0))
 		VolatileLRUCacheTest.VolatileLRUCacheDelete("vivek")
-		_, success = VolatileLRUCacheTest.VolatileLRUCacheGet("vivek")
+		_, success := VolatileLRUCacheTest.VolatileLRUCacheGet("vivek")
 		if success {
 			b.Fatalf("could not delete the element in Cache. Cache delete got failed")
 		}
@@ -139,12 +131,9 @@ func BenchmarkVolatileLRUCacheDelete(b *testing.B) {
 }
 
 func TestVolatileLRUCacheClearCache(t *testing.T) {
-	success, _ := VolatileLRUCacheTest.VolatileLRUCacheSet("vivek", "vivek", binary.Size([]byte("vivek")), time.Duration(0))
-	if !success {
-		t.Fatalf("TestClearCache could not set data to test delete")
-	}
+	VolatileLRUCacheTest.VolatileLRUCacheSet("vivek", "vivek", binary.Size([]byte("vivek")), time.Duration(0))
 	VolatileLRUCacheTest.VolatileLRUCacheClear()
-	_, success = VolatileLRUCacheTest.VolatileLRUCacheGet("vivek")
+	_, success := VolatileLRUCacheTest.VolatileLRUCacheGet("vivek")
 	if success {
 		t.Fatalf("CacheClear unit test failed")
 	}
@@ -153,12 +142,9 @@ func TestVolatileLRUCacheClearCache(t *testing.T) {
 func BenchmarkVolatileLRUCacheClearCache(b *testing.B) {
 	// run the Cache set  function b.N times
 	for n := 0; n < b.N; n++ {
-		success, _ := VolatileLRUCacheTest.VolatileLRUCacheSet("vivek", "vivek", binary.Size([]byte("vivek")), time.Duration(0))
-		if !success {
-			b.Fatalf("BenchmarkClearCache could not set data to test delete")
-		}
+		VolatileLRUCacheTest.VolatileLRUCacheSet("vivek", "vivek", binary.Size([]byte("vivek")), time.Duration(0))
 		VolatileLRUCacheTest.VolatileLRUCacheDelete("vivek")
-		_, success = VolatileLRUCacheTest.VolatileLRUCacheGet("vivek")
+		_, success := VolatileLRUCacheTest.VolatileLRUCacheGet("vivek")
 		if success {
 			b.Fatalf("CacheClear benchmark test failed")
 		}

@@ -2,12 +2,25 @@ package spectre
 
 import (
 	"bytes"
-	//"errors"
 	"fmt"
 	"runtime/debug"
+	"strconv"
 	"sync"
 	"time"
+
+	"github.com/goibibo/spectre"
 )
+
+var cacheMap = new(vlruCacheMap)
+var env string
+
+func init() {
+	cacheMap.Map = make(map[string]*VolatileLRUCache)
+}
+
+func DoInit(environment string) {
+	env = environment
+}
 
 // Link is a node in circular doubly linked list that stores information about the
 // key usage and time to live
@@ -108,6 +121,7 @@ type VolatileLRUCache struct {
 	linkMap       map[string]*Link
 	globalTTL     time.Duration
 	sync.RWMutex  // to make double linked list thread safe
+	name          string
 }
 
 // GetCurrentSize is a wrapper on top of Cache GetCurrentSize
@@ -115,7 +129,7 @@ type VolatileLRUCache struct {
 func (vlruCache *VolatileLRUCache) VolatileLRUCacheCurrentSize() int {
 	vlruCache.RLock()
 	defer vlruCache.RUnlock()
-	return vlruCache.cache.GetCurrentSize()
+	return vlruCache.cache.CurrentSize
 }
 
 func (vlruCache *VolatileLRUCache) String() string {
@@ -214,8 +228,6 @@ func (vlruCache *VolatileLRUCache) VolatileLRUCacheActiveKeysLength() (lenCounte
 	return
 }
 
-
-
 // VolatileLRUCacheGet returns the value corresponding to a key present in Cache.
 // This also modify internal doubly link list to maintain the updated ttl and lru info
 // of the keys preset in Cache.
@@ -249,35 +261,14 @@ func (vlruCache *VolatileLRUCache) VolatileLRUCacheGet(key string) (interface{},
 
 // To be used for larger calls, while being set. This delays set but makes set accurate.
 func (vlruCache *VolatileLRUCache) VolatileLRUCacheSyncSet(key string, value interface{}, size int, keyExpire time.Duration) (bool, error) {
-	vlruCache.goVolatileLRUCacheSet(key, value, size, keyExpire)
-	return true, nil
+	// Check here to avoid race condition with makeSpace()
+	return vlruCache.goVolatileLRUCacheSet(key, value, size, keyExpire)
 }
 
 // Here, while set being done, another hit can got for get, as set is async.
-func (vlruCache *VolatileLRUCache) VolatileLRUCacheSet(key string, value interface{}, size int, keyExpire time.Duration) (bool, error) {
+func (vlruCache *VolatileLRUCache) VolatileLRUCacheSet(key string, value interface{}, size int, keyExpire time.Duration) {
 	// Check here to avoid race condition with makeSpace()
 	go vlruCache.goVolatileLRUCacheSet(key, value, size, keyExpire)
-	if vlruCache.isMakingSpace {
-		fmt.Println("SPECTRE_SET_FAILED, IS_MAKING_SPACE, KEY: " + key +
-			fmt.Sprintf(" || currentsize: %v ", vlruCache.cache.CurrentSize))
-		return false, LowSpaceError
-	}
-	return true, nil
-}
-
-// Here, If Spectre is doing isMaking Space, till that time it does not queue messages to set in spectre. Set miss happens.
-// This to be used when fallback is another cache.
-func (vlruCache *VolatileLRUCache) VolatileLRUCacheNoQueueSet(key string, value interface{}, size int, keyExpire time.Duration) (bool, error) {
-	// Check here to avoid race condition with makeSpace()
-	if vlruCache.isMakingSpace {
-		vlruCache.setMiss += 1
-		fmt.Println("SPECTRE_SET_FAILED, IS_MAKING_SPACE, KEY: " + key +
-			fmt.Sprintf(" || currentsize: %v || Set Miss Count: %v", vlruCache.cache.CurrentSize, vlruCache.setMiss))
-		return false, LowSpaceError
-	} else {
-		go vlruCache.goVolatileLRUCacheSet(key, value, size, keyExpire)
-	}
-	return true, nil
 }
 
 // VolatileLRUCacheSet sets the value corresponding to a key in Cache.
@@ -385,8 +376,9 @@ func (vlruCache *VolatileLRUCache) makeSpace() (bool, error) {
 		vlruCache.isMakingSpace = false
 		vlruCache.setMiss = 0
 	}()
+	fmt.Printf("SPECTRE %s: making space for %s\n", string(env), vlruCache.name)
 	vlruCache.isMakingSpace = true
-	deleteCount := vlruCache.cache.MaxSize * 30 / 100
+	deleteCount := vlruCache.cache.MaxSize * 50 / 100
 	for cnt := 0; cnt < deleteCount; cnt++ {
 
 		// linkTBE means link to be evicted with its data(key, value) in cache
@@ -416,6 +408,50 @@ func (vlruCache *VolatileLRUCache) VolatileLRUCacheClear() {
 	vlruCache.root.ttlPrev = vlruCache.root
 }
 
+func (vlruCache *VolatileLRUCache) GetName() string {
+	return vlruCache.name
+}
+
+func (vlruCache *VolatileLRUCache) GetTtl() time.Duration {
+	return vlruCache.globalTTL
+}
+
+func (vlruCache *VolatileLRUCache) GetMaxSize() int {
+	return vlruCache.cache.MaxSize
+}
+
+type vlruCacheMap struct {
+	Map map[string]*VolatileLRUCache
+	sync.RWMutex
+}
+
+func (cacheMap *vlruCacheMap) AddCache(volatileLRUCache *VolatileLRUCache) {
+	cacheMap.Lock()
+	defer cacheMap.Unlock()
+	if _, ok := cacheMap.Map[volatileLRUCache.name]; !ok {
+		cacheMap.Map[volatileLRUCache.name] = volatileLRUCache
+	} else {
+		panic("cache already exists with name: " + volatileLRUCache.name)
+	}
+}
+
+func (cacheMap *vlruCacheMap) CacheIterator() <-chan *VolatileLRUCache {
+	cacheMap.RLock()
+	defer cacheMap.RUnlock()
+	c := make(chan *VolatileLRUCache, len(cacheMap.Map))
+	for _, cache := range cacheMap.Map {
+		c <- cache
+	}
+	defer close(c)
+	return c
+}
+
+func GetCacheIterator() <-chan *VolatileLRUCache {
+	return cacheMap.CacheIterator()
+}
+
+// Deprecated
+// Please use GetVolatileLRUCacheV2 instead if you need to use GetSpectreStatus function
 // GetVolatileLRUCache returns an instance of VolatileLRUCache with the specified
 // input params:
 //			cacheSize: size of the cache in bytes
@@ -437,4 +473,43 @@ func GetVolatileLRUCache(cacheSize int, ttl time.Duration) *VolatileLRUCache {
 	newVolatileCache.isMakingSpace = false
 	newVolatileCache.setMiss = 0
 	return newVolatileCache
+}
+
+// GetVolatileLRUCache returns an instance of VolatileLRUCache with the specified
+// input params:
+//			name: for identification. Needs to be unique
+//			cacheSize: size of the cache in bytes
+//			cachePartitions: total number map participating in internal cache.
+//			ttl: a global time duration for each key expiration.
+func GetVolatileLRUCacheV2(name string, cacheSize int, ttl time.Duration) *VolatileLRUCache {
+	newVolatileCache := &VolatileLRUCache{
+		cache:   GetDefaultCache(cacheSize),
+		root:    &Link{},
+		linkMap: make(map[string]*Link),
+		name:    name,
+	}
+	//converting ttl to seconds for microseconds
+	ttl = ttl * time.Second
+	newVolatileCache.globalTTL = ttl
+	newVolatileCache.root.lruNext = newVolatileCache.root
+	newVolatileCache.root.lruPrev = newVolatileCache.root
+	newVolatileCache.root.ttlNext = newVolatileCache.root
+	newVolatileCache.root.ttlPrev = newVolatileCache.root
+	newVolatileCache.isMakingSpace = false
+	newVolatileCache.setMiss = 0
+	return newVolatileCache
+}
+
+func GetSpectreStatus() map[string]map[string]string {
+	c := spectre.GetCacheIterator()
+	m := make(map[string]map[string]string, len(c))
+	for cacher := range c {
+		status := map[string]string{
+			"Len": strconv.Itoa(cacher.VolatileLRUCacheCurrentSize()),
+			"Max": strconv.Itoa(cacher.GetMaxSize()),
+			"Ttl": strconv.Itoa(int(cacher.GetTtl().Seconds())),
+		}
+		m[cacher.GetName()] = status
+	}
+	return m
 }
