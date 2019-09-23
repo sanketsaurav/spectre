@@ -7,8 +7,6 @@ import (
 	"strconv"
 	"sync"
 	"time"
-
-	"github.com/goibibo/spectre"
 )
 
 var cacheMap = new(vlruCacheMap)
@@ -501,7 +499,7 @@ func GetVolatileLRUCacheV2(name string, cacheSize int, ttl time.Duration) *Volat
 }
 
 func GetSpectreStatus() map[string]map[string]string {
-	c := spectre.GetCacheIterator()
+	c := GetCacheIterator()
 	m := make(map[string]map[string]string, len(c))
 	for cacher := range c {
 		status := map[string]string{
