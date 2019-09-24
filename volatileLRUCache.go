@@ -449,7 +449,7 @@ func GetCacheIterator() <-chan *VolatileLRUCache {
 }
 
 // Deprecated
-// Please use GetVolatileLRUCacheV2 instead if you need to use GetSpectreStatus function
+// Please use GetLruCache instead if you need to use GetSpectreStatus function
 // GetVolatileLRUCache returns an instance of VolatileLRUCache with the specified
 // input params:
 //			cacheSize: size of the cache in bytes
@@ -473,19 +473,20 @@ func GetVolatileLRUCache(cacheSize int, ttl time.Duration) *VolatileLRUCache {
 	return newVolatileCache
 }
 
-// GetVolatileLRUCache returns an instance of VolatileLRUCache with the specified
+// GetLruCache returns an instance of VolatileLRUCache with the specified
 // input params:
 //			name: for identification. Needs to be unique
 //			cacheSize: size of the cache in bytes
 //			cachePartitions: total number map participating in internal cache.
 //			ttl: a global time duration for each key expiration.
-func GetVolatileLRUCacheV2(name string, cacheSize int, ttl time.Duration) *VolatileLRUCache {
+func GetLruCache(name string, cacheSize int, ttl time.Duration) *VolatileLRUCache {
 	newVolatileCache := &VolatileLRUCache{
 		cache:   GetDefaultCache(cacheSize),
 		root:    &Link{},
 		linkMap: make(map[string]*Link),
 		name:    name,
 	}
+	cacheMap.AddCache(newVolatileCache)
 	//converting ttl to seconds for microseconds
 	ttl = ttl * time.Second
 	newVolatileCache.globalTTL = ttl
